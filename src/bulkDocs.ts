@@ -16,8 +16,9 @@ import {
 } from './constants'
 
 import { select, stringifyDoc, compactRevs, handleSQLiteError } from './utils'
-import type { Transaction } from '@op-engineering/op-sqlite'
+//import type { Transaction } from '@op-engineering/op-sqlite'
 import { logger } from './debug'
+import type { SQLiteDatabase } from 'expo-sqlite'
 
 interface DocInfo {
   _id: string
@@ -44,7 +45,7 @@ async function sqliteBulkDocs(
   req: Request,
   opts: Options,
   api: any,
-  transaction: (fn: (tx: Transaction) => Promise<void>) => Promise<void>,
+  transaction: (fn: (tx: SQLiteDatabase) => Promise<void>) => Promise<void>,
   sqliteChanges: any
 ): Promise<any> {
   const newEdits = opts.new_edits
@@ -62,7 +63,7 @@ async function sqliteBulkDocs(
     throw docInfoErrors[0]
   }
 
-  let tx: Transaction
+  let tx: SQLiteDatabase
   const results = new Array(docInfos.length)
   const fetchedDocs = new Map<string, any>()
 
@@ -70,8 +71,13 @@ async function sqliteBulkDocs(
     logger.debug('verify attachment:', digest)
     const sql =
       'SELECT count(*) as cnt FROM ' + ATTACH_STORE + ' WHERE digest=?'
-    const result = await tx.execute(sql, [digest])
-    if (result.rows[0]?.cnt === 0) {
+
+    const preparedStatement = await tx.prepareAsync(sql)
+    const result = await preparedStatement.executeAsync<{ cnt: number }>([
+      digest,
+    ])
+    const rows = await result.getAllAsync()
+    if (rows[0]?.cnt === 0) {
       const err = createError(
         MISSING_STUB,
         'unknown stub attachment with digest ' + digest
@@ -116,7 +122,7 @@ async function sqliteBulkDocs(
   ) {
     logger.debug('writeDoc:', { ...docInfo, data: null })
 
-    async function dataWritten(tx: Transaction, seq: number) {
+    async function dataWritten(tx: SQLiteDatabase, seq: number) {
       const id = docInfo.metadata.id
 
       let revsToCompact = docInfo.stemmedRevs || []
@@ -147,7 +153,8 @@ async function sqliteBulkDocs(
       const params = isUpdate
         ? [metadataStr, seq, winningRev, id]
         : [id, seq, seq, metadataStr]
-      await tx.execute(sql, params)
+      const preparedStatement = await tx.prepareAsync(sql)
+      await preparedStatement.executeAsync(params)
       results[resultsIdx] = {
         ok: true,
         id: docInfo.metadata.id,
@@ -163,11 +170,13 @@ async function sqliteBulkDocs(
         return
       }
 
-      function add(att: string) {
+      async function add(att: string) {
         const sql =
           'INSERT INTO ' + ATTACH_AND_SEQ_STORE + ' (digest, seq) VALUES (?,?)'
         const sqlArgs = [data._attachments[att].digest, seq]
-        return tx.execute(sql, sqlArgs)
+        return tx
+          .prepareAsync(sql)
+          .then((preparedStatement) => preparedStatement.executeAsync(sqlArgs))
       }
 
       await Promise.all(attsToAdd.map((att) => add(att)))
@@ -205,8 +214,9 @@ async function sqliteBulkDocs(
     const sqlArgs = [id, rev, json, deletedInt]
 
     try {
-      const result = await tx.execute(sql, sqlArgs)
-      const seq = result.insertId
+      const preparedStatement = await tx.prepareAsync(sql)
+      const result = await preparedStatement.executeAsync(sqlArgs)
+      const seq = result.lastInsertRowId
       if (typeof seq === 'number') {
         await insertAttachmentMappings(seq)
         await dataWritten(tx, seq)
@@ -215,8 +225,13 @@ async function sqliteBulkDocs(
       // constraint error, recover by updating instead (see #1638)
       // https://github.com/pouchdb/pouchdb/issues/1638
       const fetchSql = select('seq', BY_SEQ_STORE, null, 'doc_id=? AND rev=?')
-      const res = await tx.execute(fetchSql, [id, rev])
-      const seq = res.rows[0]!.seq as number
+      let preparedStatement = await tx.prepareAsync(fetchSql)
+      const res = await preparedStatement.executeAsync<{ seq: number }>([
+        id,
+        rev,
+      ])
+      const rows = await res.getAllAsync()
+      const seq = rows[0]?.seq!
       logger.debug(
         `Got a constraint error, updating instead: seq=${seq}, id=${id}, rev=${rev}`
       )
@@ -225,7 +240,8 @@ async function sqliteBulkDocs(
         BY_SEQ_STORE +
         ' SET json=?, deleted=? WHERE doc_id=? AND rev=?;'
       const sqlArgs = [json, deletedInt, id, rev]
-      await tx.execute(sql, sqlArgs)
+      preparedStatement = await tx.prepareAsync(sql)
+      await preparedStatement.executeAsync(sqlArgs)
       await insertAttachmentMappings(seq)
       await dataWritten(tx, seq)
     }
@@ -280,12 +296,15 @@ async function sqliteBulkDocs(
         continue
       }
       const id = docInfo.metadata.id
-      const result = await tx.execute(
-        'SELECT json FROM ' + DOC_STORE + ' WHERE id = ?',
-        [id]
+      const preparedStatement = await tx.prepareAsync(
+        'SELECT json FROM ' + DOC_STORE + ' WHERE id = ?'
       )
-      if (result.rows?.length) {
-        const metadata = safeJsonParse(result.rows[0]!.json)
+      const result = await preparedStatement.executeAsync<{ json: string }>([
+        id,
+      ])
+      const rows = await result.getAllAsync()
+      if (rows.length) {
+        const metadata = safeJsonParse(rows[0]!.json)
         fetchedDocs.set(id, metadata)
       }
     }
@@ -294,11 +313,15 @@ async function sqliteBulkDocs(
   async function saveAttachment(digest: string, data: any) {
     logger.debug('saveAttachment:', digest)
     let sql = 'SELECT digest FROM ' + ATTACH_STORE + ' WHERE digest=?'
-    const result = await tx.execute(sql, [digest])
-    if (result.rows?.length) return
+    let preparedStatement = await tx.prepareAsync(sql)
+    const result = await preparedStatement.executeAsync([digest])
+    const rows = await result.getAllAsync()
+    if (rows.length) return
     sql =
       'INSERT INTO ' + ATTACH_STORE + ' (digest, body, escaped) VALUES (?,?,0)'
-    await tx.execute(sql, [digest, data])
+
+    preparedStatement = await tx.prepareAsync(sql)
+    await preparedStatement.executeAsync([digest, data])
   }
 
   await new Promise<void>((resolve, reject) => {
@@ -308,7 +331,7 @@ async function sqliteBulkDocs(
     })
   })
 
-  await transaction(async (txn: Transaction) => {
+  await transaction(async (txn: SQLiteDatabase) => {
     await verifyAttachments()
 
     try {

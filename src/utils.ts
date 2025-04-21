@@ -1,7 +1,8 @@
 import { createError, WSQ_ERROR } from 'pouchdb-errors'
 import { guardedConsole } from 'pouchdb-utils'
 import { BY_SEQ_STORE, ATTACH_STORE, ATTACH_AND_SEQ_STORE } from './constants'
-import type { Transaction } from '@op-engineering/op-sqlite'
+import type { SQLiteDatabase } from 'expo-sqlite'
+//import type { Transaction } from '@op-engineering/op-sqlite'
 
 function stringifyDoc(doc: Record<string, any>): string {
   // don't bother storing the id/rev. it uses lots of space,
@@ -57,7 +58,7 @@ function select(
 async function compactRevs(
   revs: string[],
   docId: string,
-  tx: Transaction
+  tx: SQLiteDatabase
 ): Promise<void> {
   if (!revs.length) {
     return
@@ -86,12 +87,13 @@ async function compactRevs(
       ' WHERE seq IN ' +
       qMarks(seqs.length)
 
-    let res = await tx.execute(sql, seqs)
+    let preparedStatement = await tx.prepareAsync(sql)
+
+    let res = await preparedStatement.executeAsync<{ digest: string }>(seqs)
+    let rows = await res.getAllAsync()
     const digestsToCheck: string[] = []
-    if (res.rows) {
-      for (let i = 0; i < res.rows.length; i++) {
-        digestsToCheck.push(res.rows[i]!.digest as string)
-      }
+    for (let i = 0; i < rows.length; i++) {
+      digestsToCheck.push(rows[i]!.digest)
     }
     if (!digestsToCheck.length) {
       return
@@ -103,47 +105,58 @@ async function compactRevs(
       ' WHERE seq IN (' +
       seqs.map(() => '?').join(',') +
       ')'
-    await tx.execute(sql, seqs)
+    preparedStatement = await tx.prepareAsync(sql)
+    await preparedStatement.executeAsync(seqs)
     sql =
       'SELECT digest FROM ' +
       ATTACH_AND_SEQ_STORE +
       ' WHERE digest IN (' +
       digestsToCheck.map(() => '?').join(',') +
       ')'
-    res = await tx.execute(sql, digestsToCheck)
+    preparedStatement = await tx.prepareAsync(sql)
+    res = await preparedStatement.executeAsync(digestsToCheck)
+    rows = await res.getAllAsync()
     const nonOrphanedDigests = new Set<string>()
-    if (res.rows) {
-      for (let i = 0; i < res.rows.length; i++) {
-        nonOrphanedDigests.add(res.rows[i]!.digest as string)
-      }
+    for (let i = 0; i < rows.length; i++) {
+      nonOrphanedDigests.add(rows[i]!.digest)
     }
     for (const digest of digestsToCheck) {
       if (nonOrphanedDigests.has(digest)) {
         return
       }
-      await tx.execute(
-        'DELETE FROM ' + ATTACH_AND_SEQ_STORE + ' WHERE digest=?',
-        [digest]
+      preparedStatement = await tx.prepareAsync(
+        'DELETE FROM ' + ATTACH_AND_SEQ_STORE + ' WHERE digest=?'
       )
-      await tx.execute('DELETE FROM ' + ATTACH_STORE + ' WHERE digest=?', [
-        digest,
-      ])
+      await preparedStatement.executeAsync([digest])
+      preparedStatement = await tx.prepareAsync(
+        'DELETE FROM ' + ATTACH_STORE + ' WHERE digest=?'
+      )
+      await preparedStatement.executeAsync([digest])
     }
   }
 
   // update by-seq and attach stores in parallel
   for (const rev of revs) {
     const sql = 'SELECT seq FROM ' + BY_SEQ_STORE + ' WHERE doc_id=? AND rev=?'
+    let preparedStatement = await tx.prepareAsync(sql)
 
-    const res = await tx.execute(sql, [docId, rev])
-    if (!res.rows?.length) {
+    const res = await preparedStatement.executeAsync<{ seq: number }>([
+      docId,
+      rev,
+    ])
+    const rows = await res.getAllAsync()
+    if (!rows.length) {
       // already deleted
       return checkDone()
     }
-    const seq = res.rows[0]!.seq as number
+    const seq = rows[0]!.seq
     seqs.push(seq)
 
-    await tx.execute('DELETE FROM ' + BY_SEQ_STORE + ' WHERE seq=?', [seq])
+    preparedStatement = await tx.prepareAsync(
+      'DELETE FROM ' + BY_SEQ_STORE + ' WHERE seq=?'
+    )
+
+    await preparedStatement.executeAsync([seq])
   }
 }
 

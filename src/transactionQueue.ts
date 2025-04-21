@@ -1,18 +1,19 @@
-import type { DB, Transaction } from '@op-engineering/op-sqlite'
+//import type { DB, Transaction } from '@op-engineering/op-sqlite'
+import type { SQLiteDatabase } from 'expo-sqlite'
 import { logger } from './debug'
 
 export interface PendingTransaction {
   readonly: boolean
-  start: (tx: Transaction) => Promise<void>
+  start: (tx: SQLiteDatabase) => Promise<void>
   finish: () => void
 }
 
 export class TransactionQueue {
   queue: PendingTransaction[] = []
   inProgress = false
-  db: DB
+  db: SQLiteDatabase
 
-  constructor(db: DB) {
+  constructor(db: SQLiteDatabase) {
     this.db = db
   }
 
@@ -34,7 +35,9 @@ export class TransactionQueue {
         try {
           if (tx.readonly) {
             logger.debug('---> transaction start!')
-            await this.db.transaction(tx.start)
+            await tx.start(this.db)
+            //await this.db.withExclusiveTransactionAsync(tx.start)
+            //await this.db.transaction(tx.start)
             // await tx.start({
             //   commit: async () => {return { rowsAffected: 0 }},
             //   execute: this.db.execute.bind(this.db),
@@ -42,7 +45,7 @@ export class TransactionQueue {
             // })
           } else {
             logger.debug('---> write transaction start!')
-            await this.db.transaction(tx.start)
+            await this.db.withExclusiveTransactionAsync(tx.start)
           }
         } finally {
           logger.debug(
@@ -59,14 +62,14 @@ export class TransactionQueue {
     }
   }
 
-  async push(fn: (tx: Transaction) => Promise<void>) {
+  async push(fn: (tx: SQLiteDatabase) => Promise<void>) {
     return new Promise<void>((resolve) => {
       this.queue.push({ readonly: false, start: fn, finish: resolve })
       this.run()
     })
   }
 
-  async pushReadOnly(fn: (tx: Transaction) => Promise<void>) {
+  async pushReadOnly(fn: (tx: SQLiteDatabase) => Promise<void>) {
     return new Promise<void>((resolve) => {
       this.queue.push({ readonly: true, start: fn, finish: resolve })
       this.run()

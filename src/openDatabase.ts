@@ -1,12 +1,10 @@
-import { open } from '@op-engineering/op-sqlite'
+import { type SQLiteDatabase, openDatabaseSync } from 'expo-sqlite'
 import { TransactionQueue } from './transactionQueue'
-import type { DB } from '@op-engineering/op-sqlite'
 
-type SQLiteOpenParams = Parameters<typeof open>
-export type OpenDatabaseOptions = SQLiteOpenParams[0]
+export type OpenDatabaseOptions = { name: string }
 type OpenDatabaseResult =
   | {
-      db: DB
+      db: SQLiteDatabase
       transactionQueue: TransactionQueue
     }
   | {
@@ -17,7 +15,7 @@ const cachedDatabases = new Map<string, OpenDatabaseResult>()
 
 function openDBSafely(opts: OpenDatabaseOptions): OpenDatabaseResult {
   try {
-    const db = open(opts)
+    const db = openDatabaseSync(opts.name)
     const transactionQueue = new TransactionQueue(db)
     return { db, transactionQueue }
   } catch (err: any) {
@@ -40,7 +38,7 @@ export function closeDB(name: string) {
   const cachedResult = cachedDatabases.get(name)
   if (cachedResult) {
     if ('db' in cachedResult) {
-      cachedResult.db.close()
+      cachedResult.db.closeSync()
     }
     cachedDatabases.delete(name)
   }
